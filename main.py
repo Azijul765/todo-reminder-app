@@ -1,10 +1,7 @@
 import os
 import json
-import smtplib
+import requests
 from datetime import datetime, timezone
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.utils import formatdate, make_msgid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import firebase_admin
@@ -14,6 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Initialize Firebase Admin
 if not firebase_admin._apps:
     firebase_json_str = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
     if firebase_json_str:
@@ -26,31 +24,27 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 465
-
 def send_email(to_email: str, subject: str, body: str) -> bool:
-    sender_email = (os.getenv("SENDER_EMAIL") or "").strip()
-    sender_password = (os.getenv("SENDER_PASSWORD") or "").replace(" ", "").strip()
-
-    if not sender_email or not sender_password:
-        print("[ERROR] SENDER_EMAIL or SENDER_PASSWORD is missing in your .env file!")
+    webhook_url = os.getenv("GOOGLE_WEBHOOK_URL")
+    if not webhook_url:
+        print("[ERROR] GOOGLE_WEBHOOK_URL is missing!")
         return False
 
-    msg = MIMEMultipart()
-    msg["Subject"] = subject
-    msg["From"] = f"Task Reminder App <{sender_email}>"
-    msg["To"] = to_email
-    msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid()
-    msg.attach(MIMEText(body, "plain"))
-
+    payload = {
+        "to": to_email,
+        "subject": subject,
+        "body": body
+    }
+    
     try:
-        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=20) as server:
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
+        # Sends data securely over HTTPS (Port 443) to bypass Render's SMTP block
+        response = requests.post(webhook_url, json=payload, timeout=20)
+        if response.status_code == 200:
             print(f"[SUCCESS] Email sent to {to_email}: {subject}")
             return True
+        else:
+            print(f"[ERROR] Webhook failed with status {response.status_code}")
+            return False
     except Exception as e:
         print(f"[ERROR] Failed to send email to {to_email}: {e}")
         return False
@@ -92,9 +86,8 @@ def check_and_send_reminders():
             if send_email(user_email, subject, body):
                 db.collection("tasks").document(doc.id).update({"reminder30Sent": True})
 
-        # Custom Reminder Logic
+        # Custom Reminder
         if custom_mins and not task.get("customReminderSent", False):
-            # Triggers if the current time is within a 10-minute window of the custom request
             if (custom_mins - 10) <= minutes_left <= (custom_mins + 2):
                 subject = f"Custom Reminder ({custom_mins} Mins Left): {title}"
                 body = f"Hi!\n\nThis is your custom reminder. Your task '{title}' is due in {custom_mins} minutes!"
